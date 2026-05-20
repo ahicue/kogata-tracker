@@ -96,7 +96,7 @@ def save_pointer(index: int):
 # ── 收藏 / 已发出 ─────────────────────────────────────────────────────────────
 
 def load_collection() -> dict:
-    if os.path.exists(COLLECTION_FILE, ):
+    if os.path.exists(COLLECTION_FILE):
         with open(COLLECTION_FILE, encoding="utf-8") as f:
             return json.load(f)
     return {"favorites": [], "sent": []}
