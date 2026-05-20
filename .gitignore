@@ -1,0 +1,12 @@
+# 敏感配置（含 Webhook URL，绝对不能上传）
+.env
+
+# 运行时生成的文件
+state.json
+logs/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
