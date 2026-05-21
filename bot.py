@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 Discord bot 指令：
-  小型印  → 推送最新第1条
-  换      → 由新到旧依次推送（指针持久，不重置）
-  好      → 引用某条小型印消息，收藏该条
-  发出    → 引用某条小型印消息，纳入「已发出」
-  调出    → 显示所有收藏
-  已发出  → 显示所有已发出
+  小型印      → 推送最新小型印
+  换小型印    → 由新到旧浏览小型印
+  风景印      → 推送最新风景印
+  换风景印    → 由新到旧浏览风景印
+  好          → 引用消息，收藏该条（小型印/风景印均可）
+  发出        → 引用消息，标记已发出
+  调出        → 显示所有收藏
+  已发出      → 显示所有已发出
 
-后台任务：每天 09:00 JST 自动检查新小型印并推送 Webhook
+后台任务：每天 09:00 JST 自动检查新条目并推送 Webhook
 """
 
 import asyncio
@@ -25,6 +27,10 @@ from tracker import (
     fetch_page, parse_entries, build_embed, make_id,
     load_state, save_state, send_discord,
     INIT_MAX_PAGES, DAILY_MAX_PAGES,
+)
+from fuke_tracker import (
+    get_detail_ids_from_list, parse_detail, build_fuke_embed,
+    load_fuke_state, save_fuke_state, run_fuke_daily_check,
 )
 
 load_dotenv()
@@ -45,6 +51,13 @@ _current_page = 1
 _all_fetched = False
 _last_fetch = 0.0
 FETCH_COOLDOWN = 2.0
+
+# 风景印缓存（按 detail_id 顺序，从新到旧）
+_fuke_ids: list[str] = []        # detail_id 列表
+_fuke_cache: dict[str, dict] = {}  # detail_id → entry
+_fuke_list_page = 1
+_fuke_list_done = False
+FUKE_POINTER_FILE = os.path.join(os.path.dirname(__file__), "fuke_pointer.json")
 
 _msg_entry: dict[int, dict] = {}
 
@@ -79,7 +92,50 @@ def get_entry(index: int) -> dict | None:
     return _entries[index]
 
 
-# ── 指针持久化 ────────────────────────────────────────────────────────────────
+# ── 风景印加载 ────────────────────────────────────────────────────────────────
+
+def _load_fuke_next_page() -> bool:
+    global _fuke_list_page, _fuke_list_done
+    if _fuke_list_done:
+        return False
+    ids = get_detail_ids_from_list(_fuke_list_page)
+    if not ids:
+        _fuke_list_done = True
+        return False
+    for did in ids:
+        if did not in _fuke_cache:
+            _fuke_ids.append(did)
+    _fuke_list_page += 1
+    return True
+
+
+def get_fuke_entry(index: int) -> dict | None:
+    while index >= len(_fuke_ids):
+        if not _load_fuke_next_page():
+            return None
+    did = _fuke_ids[index]
+    if did not in _fuke_cache:
+        entry = parse_detail(did)
+        if entry:
+            _fuke_cache[did] = entry
+        else:
+            return None
+    return _fuke_cache.get(did)
+
+
+def load_fuke_pointer() -> int:
+    if os.path.exists(FUKE_POINTER_FILE):
+        with open(FUKE_POINTER_FILE) as f:
+            return json.load(f).get("index", 0)
+    return 0
+
+
+def save_fuke_pointer(index: int):
+    with open(FUKE_POINTER_FILE, "w") as f:
+        json.dump({"index": index}, f)
+
+
+# ── 小型印指针持久化 ──────────────────────────────────────────────────────────
 
 def load_pointer() -> int:
     if os.path.exists(POINTER_FILE):
@@ -180,6 +236,12 @@ async def daily_check_loop():
         except Exception as e:
             print(f"[DAILY] Error: {e}")
 
+        # 同时运行风景印每日检查
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, run_fuke_daily_check)
+        except Exception as e:
+            print(f"[DAILY][FUKE] Error: {e}")
+
 
 # ── Discord 事件 ──────────────────────────────────────────────────────────────
 
@@ -187,6 +249,7 @@ async def daily_check_loop():
 async def on_ready():
     print(f"[BOT] Logged in as {client.user}")
     _load_next_page()
+    _load_fuke_next_page()
     asyncio.ensure_future(daily_check_loop())
 
 
@@ -206,7 +269,7 @@ async def on_message(message: discord.Message):
         total = f"{len(_entries)}+" if not _all_fetched else str(len(_entries))
         await push_entry(message.channel, entry, f"🔖 最新小型印（共 {total} 条）")
 
-    elif cmd == "换":
+    elif cmd == "换小型印":
         idx = load_pointer()
         async with message.channel.typing():
             entry = get_entry(idx)
@@ -218,9 +281,36 @@ async def on_message(message: discord.Message):
         await push_entry(message.channel, entry, f"🔖 小型印 第 {idx + 1} 条（共 {total}）")
         save_pointer(idx + 1)
 
+    # ── 风景印 ──
+    elif cmd == "风景印":
+        async with message.channel.typing():
+            entry = get_fuke_entry(0)
+        if not entry:
+            await message.channel.send("⚠️ 无法获取风景印信息。")
+            return
+        total = f"{len(_fuke_ids)}+" if not _fuke_list_done else str(len(_fuke_ids))
+        embed = discord.Embed.from_dict(build_fuke_embed(entry, f"🏞️ 最新風景印（共 {total} 条）"))
+        msg = await message.channel.send(embed=embed)
+        _msg_entry[msg.id] = entry
+
+    elif cmd == "换风景印":
+        idx = load_fuke_pointer()
+        async with message.channel.typing():
+            entry = get_fuke_entry(idx)
+        if not entry:
+            await message.channel.send("📭 已到最旧一条，没有更多记录。")
+            save_fuke_pointer(0)
+            return
+        total = f"{len(_fuke_ids)}+" if not _fuke_list_done else str(len(_fuke_ids))
+        embed = discord.Embed.from_dict(build_fuke_embed(entry, f"🏞️ 風景印 第 {idx + 1} 条（共 {total}）"))
+        msg = await message.channel.send(embed=embed)
+        _msg_entry[msg.id] = entry
+        save_fuke_pointer(idx + 1)
+
+    # ── 收藏 / 发出（小型印和风景印通用，通过引用自动识别类型）──
     elif cmd == "好":
         if not message.reference:
-            await message.channel.send("请**引用**一条小型印消息后再说「好」")
+            await message.channel.send("请**引用**一条消息后再说「好」")
             return
         entry = _msg_entry.get(message.reference.message_id)
         if not entry:
@@ -236,7 +326,7 @@ async def on_message(message: discord.Message):
 
     elif cmd == "发出":
         if not message.reference:
-            await message.channel.send("请**引用**一条小型印消息后再说「发出」")
+            await message.channel.send("请**引用**一条消息后再说「发出」")
             return
         entry = _msg_entry.get(message.reference.message_id)
         if not entry:
@@ -258,7 +348,13 @@ async def on_message(message: discord.Message):
             return
         await message.channel.send(f"⭐ 共 {len(favs)} 条收藏：")
         for i, entry in enumerate(favs):
-            await push_entry(message.channel, entry, f"⭐ 收藏 {i + 1}/{len(favs)}")
+            is_fuke = entry.get("type") == "fuke"
+            if is_fuke:
+                embed = discord.Embed.from_dict(build_fuke_embed(entry, f"⭐ 收藏 {i+1}/{len(favs)}（風景印）"))
+                msg = await message.channel.send(embed=embed)
+            else:
+                msg = await push_entry(message.channel, entry, f"⭐ 收藏 {i+1}/{len(favs)}（小型印）")
+            _msg_entry[msg.id] = entry
             await asyncio.sleep(0.5)
 
     elif cmd == "已发出":
@@ -269,7 +365,13 @@ async def on_message(message: discord.Message):
             return
         await message.channel.send(f"📬 共 {len(sent)} 条已发出：")
         for i, entry in enumerate(sent):
-            await push_entry(message.channel, entry, f"📬 已发出 {i + 1}/{len(sent)}")
+            is_fuke = entry.get("type") == "fuke"
+            if is_fuke:
+                embed = discord.Embed.from_dict(build_fuke_embed(entry, f"📬 已发出 {i+1}/{len(sent)}（風景印）"))
+                msg = await message.channel.send(embed=embed)
+            else:
+                msg = await push_entry(message.channel, entry, f"📬 已发出 {i+1}/{len(sent)}（小型印）")
+            _msg_entry[msg.id] = entry
             await asyncio.sleep(0.5)
 
 
