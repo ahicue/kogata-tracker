@@ -5,6 +5,9 @@ on:
     - cron: '0 0 * * *'   # UTC 00:00 = JST 09:00
   workflow_dispatch:        # 允许手动触发测试
 
+permissions:
+  contents: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
