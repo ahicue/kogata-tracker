@@ -2,7 +2,6 @@
 .env
 
 # 运行时生成的文件
-state.json
 logs/
 
 # Python 缓存
